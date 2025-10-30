@@ -2,7 +2,7 @@ name: Update gold/silver prices
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # every 30 minutes
+    - cron: '*/10 * * * *'   # every 10 minutes
   workflow_dispatch:          # allows manual run too
 
 jobs:
