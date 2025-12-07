@@ -1,12 +1,12 @@
 {
   "gold": {
     "24": {
-      "sell": 6411.5,
-      "buy": 6365.75
+      "sell": null,
+      "buy": null
     },
     "21": {
-      "sell": 4808.5,
-      "buy": 4774.25
+      "sell": null,
+      "buy": null
     },
     "18": {
       "sell": null,
@@ -15,8 +15,8 @@
   },
   "silver": {
     "999": {
-      "sell": 93.0,
-      "buy": 90.0
+      "sell": null,
+      "buy": null
     },
     "925": {
       "sell": null,
@@ -27,5 +27,5 @@
       "buy": null
     }
   },
-  "last_updated": "2025-12-07T21:50:51.222362+00:00"
+  "last_updated": "2025-12-07T22:01:32.387351+00:00"
 }
