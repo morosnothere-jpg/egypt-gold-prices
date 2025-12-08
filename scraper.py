@@ -10,10 +10,8 @@ import pytesseract
 import random
 import time
 
-# Configuration
 URL = "https://market.isagha.com/prices"
 
-# Rotating User-Agents (looks like different browsers/devices)
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -38,59 +36,50 @@ def get_headers():
     }
 
 def decode_base64_image(base64_string):
-    """Decode base64 image string to PIL Image"""
     try:
         if 'base64,' in base64_string:
             base64_string = base64_string.split('base64,')[1]
-        image_data = base64.b64decode(base64_string)
-        image = Image.open(BytesIO(image_data))
-        return image
+        return Image.open(BytesIO(base64.b64decode(base64_string)))
     except Exception as e:
-        print(f"⚠️  Error decoding image: {e}")
+        print(f"⚠️ Error decoding image: {e}")
         return None
 
-def ocr_price_from_image(image):
-    """Extract price number from image using OCR"""
-    if image is None:
-        return None
-    try:
-        # Convert to grayscale
-        image = image.convert('L')
-        # Resize to improve OCR accuracy
-        image = image.resize((image.width*2, image.height*2), Image.LANCZOS)
-        # Sharpen and enhance contrast
-        image = image.filter(ImageFilter.SHARPEN)
-        image = ImageEnhance.Contrast(image).enhance(2.0)
-        # Binarize image
-        image = image.point(lambda x: 0 if x < 128 else 255, '1')
+def preprocess_image(img):
+    """Resize, sharpen, enhance, binarize"""
+    img = img.convert('L')  # grayscale
+    img = img.resize((img.width*2, img.height*2), Image.LANCZOS)
+    img = img.filter(ImageFilter.SHARPEN)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = img.point(lambda x: 0 if x < 128 else 255, '1')
+    return img
 
-        # OCR using Tesseract
-        custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.'
-        raw_text = pytesseract.image_to_string(image, config=custom_config)
-        print(f"Raw OCR output: '{raw_text}'")
-
-        # Correct common misreads
-        raw_text = raw_text.replace('O', '0').replace('l', '1').replace(',', '')
-        cleaned = re.sub(r'[^\d.]', '', raw_text)
-
-        if cleaned and cleaned != '.':
-            price = float(cleaned)
-            if 1 <= price <= 100000:  # Reasonable range
-                return price
+def ocr_price_from_image(img, max_retries=3):
+    if img is None:
         return None
-    except Exception as e:
-        print(f"⚠️ OCR error: {e}")
-        return None
+    for attempt in range(max_retries):
+        try:
+            processed = preprocess_image(img)
+            custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.'
+            raw = pytesseract.image_to_string(processed, config=custom_config).strip()
+            print(f"Raw OCR output: '{raw}'")
+            raw = raw.replace('O', '0').replace('l', '1').replace('I','1').replace(',', '')
+            cleaned = re.sub(r'[^\d.]', '', raw)
+            if cleaned and cleaned != '.':
+                price = float(cleaned)
+                if 1 <= price <= 100000:
+                    return price
+        except Exception as e:
+            print(f"⚠️ OCR attempt {attempt+1} failed: {e}")
+        time.sleep(0.1)  # small delay between retries
+    print("⚠️ OCR failed completely for this image")
+    return None
 
 def find_price_images_accurate(soup, section_id, karat_text):
-    """Find price images for a given karat/purity using improved method"""
     section = soup.find(id=section_id)
     if not section:
-        print(f"⚠️  Section '{section_id}' not found")
+        print(f"⚠️ Section '{section_id}' not found")
         return None, None
-
-    all_spans = section.find_all('span')
-    for span in all_spans:
+    for span in section.find_all('span'):
         if karat_text in span.get_text(strip=True):
             current = span
             price_container = None
@@ -108,70 +97,53 @@ def find_price_images_accurate(soup, section_id, karat_text):
                     sell_img_tag = value_divs[0].find('img', class_='price-cell')
                     buy_img_tag = value_divs[1].find('img', class_='price-cell')
                     if sell_img_tag and buy_img_tag:
-                        sell_image = decode_base64_image(sell_img_tag.get('src', ''))
-                        buy_image = decode_base64_image(buy_img_tag.get('src', ''))
-                        sell_price = ocr_price_from_image(sell_image)
-                        buy_price = ocr_price_from_image(buy_image)
+                        sell_img = decode_base64_image(sell_img_tag.get('src',''))
+                        buy_img = decode_base64_image(buy_img_tag.get('src',''))
+                        sell_price = ocr_price_from_image(sell_img)
+                        buy_price = ocr_price_from_image(buy_img)
                         if sell_price and buy_price:
                             print(f"✓ {section_id} {karat_text}: sell={sell_price}, buy={buy_price}")
                             return sell_price, buy_price
-                        else:
-                            print(f"⚠️  OCR failed for {section_id} {karat_text}")
-    print(f"⚠️  Could not find structure for {section_id} {karat_text}")
     return None, None
 
 def scrape_prices():
     print("🔄 Fetching data from", URL)
     try:
-        delay = random.uniform(1, 3)
-        print(f"⏳ Waiting {delay:.1f}s before request...")
-        time.sleep(delay)
+        time.sleep(random.uniform(1,3))
         response = requests.get(URL, headers=get_headers(), timeout=30)
         response.raise_for_status()
         print(f"✓ Status: {response.status_code}")
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"❌ Failed to fetch URL: {e}")
         raise
 
     soup = BeautifulSoup(response.text, "html.parser")
     print("\n📊 Extracting prices with OCR...")
 
-    gold_24_sell, gold_24_buy = find_price_images_accurate(soup, "gold", "24")
-    gold_21_sell, gold_21_buy = find_price_images_accurate(soup, "gold", "21")
-    gold_18_sell, gold_18_buy = find_price_images_accurate(soup, "gold", "18")
-
-    silver_999_sell, silver_999_buy = find_price_images_accurate(soup, "silver", "999")
-    silver_925_sell, silver_925_buy = find_price_images_accurate(soup, "silver", "925")
-    silver_800_sell, silver_800_buy = find_price_images_accurate(soup, "silver", "800")
-
     data = {
-        "gold": {
-            "24": {"sell": gold_24_sell, "buy": gold_24_buy},
-            "21": {"sell": gold_21_sell, "buy": gold_21_buy},
-            "18": {"sell": gold_18_sell, "buy": gold_18_buy},
-        },
-        "silver": {
-            "999": {"sell": silver_999_sell, "buy": silver_999_buy},
-            "925": {"sell": silver_925_sell, "buy": silver_925_buy},
-            "800": {"sell": silver_800_sell, "buy": silver_800_buy},
-        },
+        "gold": {},
+        "silver": {},
         "last_updated": datetime.now(timezone.utc).isoformat()
     }
 
+    for karat in ["24","21","18"]:
+        sell, buy = find_price_images_accurate(soup, "gold", karat)
+        data["gold"][karat] = {"sell": sell, "buy": buy}
+
+    for karat in ["999","925","800"]:
+        sell, buy = find_price_images_accurate(soup, "silver", karat)
+        data["silver"][karat] = {"sell": sell, "buy": buy}
+
     total_prices = sum(
-        1 for metal in data.values() 
-        if isinstance(metal, dict)
-        for karat in metal.values()
-        if isinstance(karat, dict)
-        for price in karat.values()
-        if price is not None
+        1 for metal in data.values() if isinstance(metal, dict)
+        for karat in metal.values() if isinstance(karat, dict)
+        for price in karat.values() if price is not None
     )
     print(f"\n📈 Extracted {total_prices}/12 prices successfully")
     if total_prices == 0:
         raise ValueError("❌ Failed to extract any prices!")
     elif total_prices < 8:
-        print(f"⚠️  Warning: Only {total_prices}/12 prices extracted")
-
+        print(f"⚠️ Warning: Only {total_prices}/12 prices extracted")
     return data
 
 def main():
