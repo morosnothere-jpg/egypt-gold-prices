@@ -52,7 +52,7 @@ def decode_base64_image(base64_string):
         return None
 
 def ocr_price_from_image(image):
-    """Extract price number from image using OCR"""
+    """Extract price number from image using OCR with improved preprocessing and post-processing."""
     if image is None:
         return None
     
@@ -63,29 +63,37 @@ def ocr_price_from_image(image):
         # Resize (2x) for better OCR
         image = image.resize((image.width * 2, image.height * 2), Image.LANCZOS)
         
-        # Enhance contrast
-        from PIL import ImageEnhance
+        # Enhance contrast and sharpen
+        from PIL import ImageEnhance, ImageFilter
         enhancer = ImageEnhance.Contrast(image)
         image = enhancer.enhance(2)
-        
-        # Sharpen image
-        from PIL import ImageFilter
         image = image.filter(ImageFilter.SHARPEN)
         
-        # OCR configuration optimized for numbers
-        custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.'
+        # Binarize image (threshold)
+        image = image.point(lambda x: 0 if x < 140 else 255, '1')
+        
+        # OCR config: include comma in whitelist
+        custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,'
         raw_text = pytesseract.image_to_string(image, config=custom_config)
         
         print(f"Raw OCR output: '{raw_text}'")  # Debug print
         
         # Clean OCR text
         text = raw_text.strip().replace(' ', '').replace('\n', '')
+        
+        # Replace common OCR misreads
+        text = text.replace('l', '1').replace('I', '1').replace('|', '1')
+        text = text.replace('O', '0').replace('o', '0')
+        
+        # Remove commas (assume thousands separator)
+        text = text.replace(',', '')
+        
+        # Remove any non-digit and non-decimal characters
         cleaned = re.sub(r'[^\d.]', '', text)
         
         if cleaned and cleaned != '.':
             price = float(cleaned)
-            # Sanity check: prices should be reasonable (between 1 and 100000)
-            if 1 <= price <= 100000:
+            if 1 <= price <= 1_000_000:
                 return price
         return None
     except Exception as e:
@@ -102,36 +110,29 @@ def find_price_images_accurate(soup, section_id, karat_text):
         print(f"⚠️  Section '{section_id}' not found")
         return None, None
     
-    # Find all span tags
     all_spans = section.find_all('span')
     
     for span in all_spans:
         span_text = span.get_text(strip=True)
         
-        # Check if this span contains our karat number (e.g., "21" or "عيار 21")
         if karat_text in span_text:
-            # Navigate up to find the parent container with the stats
             current = span
             price_container = None
             
-            # Go up through parents to find the clearfix stats div
-            for _ in range(10):  # Max 10 levels up
+            for _ in range(10):
                 current = current.parent
                 if current is None:
                     break
                 
-                # Look for the stats container
                 stats_div = current.find('div', class_='clearfix stats') or current.find('div', class_='stats')
                 if stats_div:
                     price_container = stats_div
                     break
             
             if price_container:
-                # Find all div.value inside this container
                 value_divs = price_container.find_all('div', class_='value')
                 
                 if len(value_divs) >= 2:
-                    # Each value div should contain an img.price-cell
                     sell_img_tag = value_divs[0].find('img', class_='price-cell')
                     buy_img_tag = value_divs[1].find('img', class_='price-cell')
                     
@@ -139,7 +140,6 @@ def find_price_images_accurate(soup, section_id, karat_text):
                         sell_img = sell_img_tag.get('src', '')
                         buy_img = buy_img_tag.get('src', '')
                         
-                        # Decode and OCR
                         sell_image = decode_base64_image(sell_img)
                         buy_image = decode_base64_image(buy_img)
                         
@@ -164,7 +164,6 @@ def scrape_prices():
     print("🔄 Fetching data from", URL)
     
     try:
-        # Add random delay before request (1-3 seconds)
         delay = random.uniform(1, 3)
         print(f"⏳ Waiting {delay:.1f}s before request...")
         import time
@@ -180,23 +179,16 @@ def scrape_prices():
     
     soup = BeautifulSoup(response.text, "html.parser")
     
-    # Save HTML for debugging if needed
-    # with open("debug_page.html", "w", encoding="utf-8") as f:
-    #     f.write(soup.prettify())
-    
     print("\n📊 Extracting prices with OCR...")
     
-    # Extract gold prices
     gold_24_sell, gold_24_buy = find_price_images_accurate(soup, "gold", "24")
     gold_21_sell, gold_21_buy = find_price_images_accurate(soup, "gold", "21")
     gold_18_sell, gold_18_buy = find_price_images_accurate(soup, "gold", "18")
     
-    # Extract silver prices
     silver_999_sell, silver_999_buy = find_price_images_accurate(soup, "silver", "999")
     silver_925_sell, silver_925_buy = find_price_images_accurate(soup, "silver", "925")
     silver_800_sell, silver_800_buy = find_price_images_accurate(soup, "silver", "800")
     
-    # Build data structure
     data = {
         "gold": {
             "24": {"sell": gold_24_sell, "buy": gold_24_buy},
@@ -211,7 +203,6 @@ def scrape_prices():
         "last_updated": datetime.now(timezone.utc).isoformat()
     }
     
-    # Validation
     total_prices = sum(
         1 for metal in data.values() 
         if isinstance(metal, dict)
@@ -225,7 +216,7 @@ def scrape_prices():
     
     if total_prices == 0:
         raise ValueError("❌ Failed to extract any prices!")
-    elif total_prices < 8:  # At least 8/12 prices should work
+    elif total_prices < 8:
         print(f"⚠️  Warning: Only {total_prices}/12 prices extracted")
     
     return data
@@ -233,13 +224,9 @@ def scrape_prices():
 def main():
     try:
         data = scrape_prices()
-        
-        # Save to JSON
         with open("prices.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        
         print("\n✅ prices.json updated successfully!")
-        
     except Exception as e:
         print(f"\n❌ Error: {e}")
         raise
