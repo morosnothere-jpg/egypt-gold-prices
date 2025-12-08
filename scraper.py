@@ -57,21 +57,29 @@ def ocr_price_from_image(image):
         return None
     
     try:
-        # Convert to grayscale and enhance for better OCR
+        # Convert to grayscale
         image = image.convert('L')
+        
+        # Resize (2x) for better OCR
+        image = image.resize((image.width * 2, image.height * 2), Image.LANCZOS)
         
         # Enhance contrast
         from PIL import ImageEnhance
         enhancer = ImageEnhance.Contrast(image)
         image = enhancer.enhance(2)
         
+        # Sharpen image
+        from PIL import ImageFilter
+        image = image.filter(ImageFilter.SHARPEN)
+        
         # OCR configuration optimized for numbers
         custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.'
-        text = pytesseract.image_to_string(image, config=custom_config)
+        raw_text = pytesseract.image_to_string(image, config=custom_config)
         
-        # Extract number from OCR result
-        text = text.strip().replace(' ', '').replace('\n', '')
-        # Remove any non-numeric characters except decimal point
+        print(f"Raw OCR output: '{raw_text}'")  # Debug print
+        
+        # Clean OCR text
+        text = raw_text.strip().replace(' ', '').replace('\n', '')
         cleaned = re.sub(r'[^\d.]', '', text)
         
         if cleaned and cleaned != '.':
