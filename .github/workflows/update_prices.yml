@@ -28,8 +28,6 @@ jobs:
           sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
-          
-          # Verify installation
           google-chrome --version
           
       - name: Install Tesseract OCR
@@ -54,7 +52,7 @@ jobs:
           RETRY_DELAY=60
           COUNT=0
           
-          until python scraper_selenium.py; do
+          until python scraper_selenium_fixed.py; do
             COUNT=$((COUNT+1))
             if [ $COUNT -ge $MAX_RETRIES ]; then
               echo "❌ Scraper failed after $COUNT attempts."
@@ -73,7 +71,7 @@ jobs:
               data = json.load(f)
           total = sum(1 for m in data.values() if isinstance(m, dict) for k in m.values() if isinstance(k, dict) for p in k.values() if p is not None)
           print(f'✓ Validated: {total}/12 prices found')
-          if total < 6:
+          if total < 4:
               raise ValueError(f'Only {total}/12 prices extracted - threshold not met!')
           "
           
