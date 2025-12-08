@@ -57,28 +57,36 @@ def ocr_price_from_image(image):
         return None
     
     try:
-        # Convert to grayscale for better OCR
+        # Convert to grayscale and enhance for better OCR
         image = image.convert('L')
+        
+        # Enhance contrast
+        from PIL import ImageEnhance
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(2)
         
         # OCR configuration optimized for numbers
         custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.'
         text = pytesseract.image_to_string(image, config=custom_config)
         
         # Extract number from OCR result
-        text = text.strip()
+        text = text.strip().replace(' ', '').replace('\n', '')
         # Remove any non-numeric characters except decimal point
         cleaned = re.sub(r'[^\d.]', '', text)
         
-        if cleaned:
-            return float(cleaned)
+        if cleaned and cleaned != '.':
+            price = float(cleaned)
+            # Sanity check: prices should be reasonable (between 1 and 100000)
+            if 1 <= price <= 100000:
+                return price
         return None
     except Exception as e:
         print(f"⚠️  OCR error: {e}")
         return None
 
-def find_price_images(soup, section_id, karat_text):
+def find_price_images_accurate(soup, section_id, karat_text):
     """
-    Find price images for a specific karat/purity in a section
+    More accurate method: Find span with karat number, then get price images from parent container
     Returns tuple: (sell_price, buy_price)
     """
     section = soup.find(id=section_id)
@@ -86,36 +94,61 @@ def find_price_images(soup, section_id, karat_text):
         print(f"⚠️  Section '{section_id}' not found")
         return None, None
     
-    # Find all cards/containers
-    all_divs = section.find_all('div', recursive=True)
+    # Find all span tags
+    all_spans = section.find_all('span')
     
-    for div in all_divs:
-        div_text = div.get_text()
+    for span in all_spans:
+        span_text = span.get_text(strip=True)
         
-        # Check if this div contains our karat/purity
-        if karat_text in div_text:
-            # Find all img tags with class 'price-cell' in this div
-            price_images = div.find_all('img', class_='price-cell')
+        # Check if this span contains our karat number (e.g., "21" or "عيار 21")
+        if karat_text in span_text:
+            # Navigate up to find the parent container with the stats
+            current = span
+            price_container = None
             
-            if len(price_images) >= 2:
-                # First image = sell, Second image = buy
-                sell_img = price_images[0].get('src', '')
-                buy_img = price_images[1].get('src', '')
+            # Go up through parents to find the clearfix stats div
+            for _ in range(10):  # Max 10 levels up
+                current = current.parent
+                if current is None:
+                    break
                 
-                # Decode and OCR
-                sell_image = decode_base64_image(sell_img)
-                buy_image = decode_base64_image(buy_img)
+                # Look for the stats container
+                stats_div = current.find('div', class_='clearfix stats') or current.find('div', class_='stats')
+                if stats_div:
+                    price_container = stats_div
+                    break
+            
+            if price_container:
+                # Find all div.value inside this container
+                value_divs = price_container.find_all('div', class_='value')
                 
-                sell_price = ocr_price_from_image(sell_image)
-                buy_price = ocr_price_from_image(buy_image)
-                
-                if sell_price and buy_price:
-                    print(f"✓ {section_id} {karat_text}: sell={sell_price}, buy={buy_price}")
-                    return sell_price, buy_price
-                else:
-                    print(f"⚠️  Failed OCR for {section_id} {karat_text}")
+                if len(value_divs) >= 2:
+                    # Each value div should contain an img.price-cell
+                    sell_img_tag = value_divs[0].find('img', class_='price-cell')
+                    buy_img_tag = value_divs[1].find('img', class_='price-cell')
+                    
+                    if sell_img_tag and buy_img_tag:
+                        sell_img = sell_img_tag.get('src', '')
+                        buy_img = buy_img_tag.get('src', '')
+                        
+                        # Decode and OCR
+                        sell_image = decode_base64_image(sell_img)
+                        buy_image = decode_base64_image(buy_img)
+                        
+                        sell_price = ocr_price_from_image(sell_image)
+                        buy_price = ocr_price_from_image(buy_image)
+                        
+                        if sell_price and buy_price:
+                            print(f"✓ {section_id} {karat_text}: sell={sell_price}, buy={buy_price}")
+                            return sell_price, buy_price
+                        else:
+                            print(f"⚠️  OCR failed for {section_id} {karat_text}")
+                            if sell_price:
+                                print(f"   Sell OK: {sell_price}, Buy failed")
+                            if buy_price:
+                                print(f"   Buy OK: {buy_price}, Sell failed")
     
-    print(f"⚠️  Could not find images for {section_id} {karat_text}")
+    print(f"⚠️  Could not find structure for {section_id} {karat_text}")
     return None, None
 
 def scrape_prices():
@@ -139,17 +172,21 @@ def scrape_prices():
     
     soup = BeautifulSoup(response.text, "html.parser")
     
+    # Save HTML for debugging if needed
+    # with open("debug_page.html", "w", encoding="utf-8") as f:
+    #     f.write(soup.prettify())
+    
     print("\n📊 Extracting prices with OCR...")
     
     # Extract gold prices
-    gold_24_sell, gold_24_buy = find_price_images(soup, "gold", "24")
-    gold_21_sell, gold_21_buy = find_price_images(soup, "gold", "21")
-    gold_18_sell, gold_18_buy = find_price_images(soup, "gold", "18")
+    gold_24_sell, gold_24_buy = find_price_images_accurate(soup, "gold", "24")
+    gold_21_sell, gold_21_buy = find_price_images_accurate(soup, "gold", "21")
+    gold_18_sell, gold_18_buy = find_price_images_accurate(soup, "gold", "18")
     
     # Extract silver prices
-    silver_999_sell, silver_999_buy = find_price_images(soup, "silver", "999")
-    silver_925_sell, silver_925_buy = find_price_images(soup, "silver", "925")
-    silver_800_sell, silver_800_buy = find_price_images(soup, "silver", "800")
+    silver_999_sell, silver_999_buy = find_price_images_accurate(soup, "silver", "999")
+    silver_925_sell, silver_925_buy = find_price_images_accurate(soup, "silver", "925")
+    silver_800_sell, silver_800_buy = find_price_images_accurate(soup, "silver", "800")
     
     # Build data structure
     data = {
@@ -180,7 +217,7 @@ def scrape_prices():
     
     if total_prices == 0:
         raise ValueError("❌ Failed to extract any prices!")
-    elif total_prices < 12:
+    elif total_prices < 8:  # At least 8/12 prices should work
         print(f"⚠️  Warning: Only {total_prices}/12 prices extracted")
     
     return data
