@@ -5,12 +5,12 @@
       "buy": 6377.5
     },
     "21": {
-      "sell": 42.0,
+      "sell": 605.0,
       "buy": null
     },
     "18": {
-      "sell": null,
-      "buy": null
+      "sell": 3736.78,
+      "buy": 3720.0
     }
   },
   "silver": {
@@ -19,13 +19,13 @@
       "buy": null
     },
     "925": {
-      "sell": null,
-      "buy": null
+      "sell": 42.0,
+      "buy": 3258.0
     },
     "800": {
-      "sell": null,
+      "sell": 375.0,
       "buy": null
     }
   },
-  "last_updated": "2025-12-09T03:31:54.953676+00:00"
+  "last_updated": "2025-12-09T03:36:15.406008+00:00"
 }
