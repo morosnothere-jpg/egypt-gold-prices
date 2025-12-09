@@ -104,25 +104,8 @@ def extract_price_from_base64_image(base64_string, debug_name=""):
         return None
 
 def get_price(selector, soup, debug_name=""):
-    """Extract and clean price from either text or base64 image."""
-    el = soup.select_one(selector)
-    if not el:
-        print(f"⚠️  Element not found: {debug_name}")
-        return None
-    
-    # Check if price is in an image
-    img = el.select_one('img.price-cell')
-    if img and img.get('src'):
-        src = img.get('src')
-        if src.startswith('data:image'):
-            return extract_price_from_base64_image(src, debug_name)
-    
-    # Fallback to text extraction (old method)
-    text = el.get_text(strip=True).replace("ج.م", "").replace("$", "").strip()
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    """DEPRECATED - kept for compatibility"""
+    pass
 
 def main():
     print("🔄 Fetching data from", URL)
@@ -132,34 +115,49 @@ def main():
     soup = BeautifulSoup(response.text, "lxml")
 
     print("\n📊 Extracting prices...")
+    
+    # Find all price panels
+    gold_tab = soup.select_one('#gold')
+    silver_tab = soup.select_one('#silver')
+    
+    # Get all price panels in each tab
+    gold_panels = gold_tab.select('.isagha-panel') if gold_tab else []
+    silver_panels = silver_tab.select('.isagha-panel') if silver_tab else []
+    
+    print(f"Found {len(gold_panels)} gold panels, {len(silver_panels)} silver panels")
+    
+    def extract_from_panel(panel, name):
+        """Extract sell and buy prices from a panel"""
+        values = panel.select('.value')
+        if len(values) >= 2:
+            sell = get_price_from_element(values[0], f"{name} Sell")
+            buy = get_price_from_element(values[1], f"{name} Buy")
+            return {"sell": sell, "buy": buy}
+        return {"sell": None, "buy": None}
+    
+    def get_price_from_element(el, debug_name):
+        """Extract price directly from element"""
+        img = el.select_one('img.price-cell')
+        if img and img.get('src'):
+            src = img.get('src')
+            if src.startswith('data:image'):
+                return extract_price_from_base64_image(src, debug_name)
+        text = el.get_text(strip=True).replace("ج.م", "").replace("$", "").strip()
+        try:
+            return float(text)
+        except:
+            return None
+    
     data = {
         "gold": {
-            "24": {
-                "sell": get_price("#gold > div > div:nth-child(1) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup, "Gold 24k Sell"),
-                "buy": get_price("#gold > div > div:nth-child(1) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup, "Gold 24k Buy")
-            },
-            "21": {
-                "sell": get_price("#gold > div > div:nth-child(7) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup, "Gold 21k Sell"),
-                "buy": get_price("#gold > div > div:nth-child(7) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup, "Gold 21k Buy")
-            },
-            "18": {
-                "sell": get_price("#gold > div > div:nth-child(10) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup, "Gold 18k Sell"),
-                "buy": get_price("#gold > div > div:nth-child(10) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup, "Gold 18k Buy")
-            },
+            "24": extract_from_panel(gold_panels[0], "Gold 24k") if len(gold_panels) > 0 else {"sell": None, "buy": None},
+            "21": extract_from_panel(gold_panels[2], "Gold 21k") if len(gold_panels) > 2 else {"sell": None, "buy": None},
+            "18": extract_from_panel(gold_panels[4], "Gold 18k") if len(gold_panels) > 4 else {"sell": None, "buy": None},
         },
         "silver": {
-            "999": {
-                "sell": get_price("#silver > div > div:nth-child(1) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup, "Silver 999 Sell"),
-                "buy": get_price("#silver > div > div:nth-child(1) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup, "Silver 999 Buy")
-            },
-            "925": {
-                "sell": get_price("#silver > div > div:nth-child(4) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup, "Silver 925 Sell"),
-                "buy": get_price("#silver > div > div:nth-child(4) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup, "Silver 925 Buy")
-            },
-            "800": {
-                "sell": get_price("#silver > div > div:nth-child(10) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup, "Silver 800 Sell"),
-                "buy": get_price("#silver > div > div:nth-child(10) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup, "Silver 800 Buy")
-            },
+            "999": extract_from_panel(silver_panels[0], "Silver 999") if len(silver_panels) > 0 else {"sell": None, "buy": None},
+            "925": extract_from_panel(silver_panels[1], "Silver 925") if len(silver_panels) > 1 else {"sell": None, "buy": None},
+            "800": extract_from_panel(silver_panels[2], "Silver 800") if len(silver_panels) > 2 else {"sell": None, "buy": None},
         },
         "last_updated": datetime.now(timezone.utc).isoformat()
     }
