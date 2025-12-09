@@ -10,11 +10,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Random Sleep for Stealth (TEST MODE)
+      - name: Random Sleep for Stealth
         run: |
-          # Sleep for a random time between 0 and 10 seconds
-          SLEEP_TIME=$((RANDOM % 10))
-          echo "Sleeping for $SLEEP_TIME seconds to randomize execution time (TEST MODE)..."
+          # Sleep for a random time between 0 and 123 seconds
+          SLEEP_TIME=$((RANDOM % 123))
+          echo "Sleeping for $SLEEP_TIME seconds to randomize execution time..."
           sleep $SLEEP_TIME
 
       - name: Checkout repository
