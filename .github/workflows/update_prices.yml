@@ -2,7 +2,7 @@ name: Update gold/silver prices
 
 on:
   schedule:
-    - cron: '*/90 * * * *'   # every 90 minutes
+    - cron: '0 */2 * * *'   # Every 2 hours
   workflow_dispatch:          # allow manual trigger too
 
 jobs:
@@ -10,6 +10,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Random Sleep for Stealth
+        run: |
+          # Sleep for a random time between 0 and 30 minutes (1800 seconds)
+          SLEEP_TIME=$((RANDOM % 1800))
+          echo "Sleeping for $SLEEP_TIME seconds to randomize execution time..."
+          sleep $SLEEP_TIME
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
