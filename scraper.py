@@ -90,8 +90,8 @@ def validate_data(data):
                     if data[metal][karat].get(type_) is not None:
                         valid_prices += 1
     
-    # Consider valid if we have > 50% of the data
-    is_valid = total_prices > 0 and (valid_prices / total_prices) >= 0.5
+    # Consider valid if we have > 80% of the data (i.e. < 20% nulls)
+    is_valid = total_prices > 0 and (valid_prices / total_prices) > 0.8
     return is_valid, valid_prices, total_prices
 
 # --- PRIMARY SCRAPER (ISAGHA) ---
