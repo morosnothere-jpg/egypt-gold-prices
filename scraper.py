@@ -37,19 +37,45 @@ def extract_price_from_base64_image(base64_string):
         image = Image.open(io.BytesIO(image_data))
         
         # Preprocess image
-        # Convert to grayscale
+        # 1. Handle transparency (RGBA -> RGB with white background)
+        if image.mode in ('RGBA', 'LA'):
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            background.paste(image, mask=image.split()[-1])
+            image = background
+        else:
+            image = image.convert('RGB')
+            
+        # 2. Upscale image (crucial for small text)
+        # 3x scaling seems to be a good sweet spot for Tesseract
+        image = image.resize((image.width * 3, image.height * 3), Image.Resampling.LANCZOS)
+        
+        # 3. Convert to grayscale for thresholding
         image = image.convert('L')
-        # Binarize (thresholding) - this often helps with clear text on solid backgrounds
-        # You might need to adjust the threshold value (128 is a starting point)
-        image = image.point(lambda x: 0 if x < 140 else 255, '1')
+        
+        # 4. Apply simple thresholding to make text distinct
+        # Adjust threshold as needed, 160 is usually good for black text on white
+        image = image.point(lambda x: 0 if x < 160 else 255, '1')
+        
+        # 5. Add border (padding) to help Tesseract with edge characters
+        from PIL import ImageOps
+        image = ImageOps.expand(image, border=20, fill='white')
         
         # Configure Tesseract
         # --psm 7: Treat the image as a single text line.
-        # -c tessedit_char_whitelist=0123456789.: Only recognize numbers and decimal point
-        custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.'
+        # -c tessedit_char_whitelist=0123456789.,: Allow numbers, dots, and commas
+        custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.,'
         
         # Run OCR
         text = pytesseract.image_to_string(image, config=custom_config)
+        
+        if not text.strip():
+            # If standard OCR fails, try without thresholding (grayscale only)
+            # Sometimes thresholding removes too much detail
+            custom_config_loose = r'--psm 7'
+            text = pytesseract.image_to_string(image, config=custom_config_loose)
+
+        # Debug: check raw extracted text
+        # print(f"DEBUG: Raw extracted text: '{text.strip()}'")
         
         # Clean and parse
         return cleanup_text(text)
