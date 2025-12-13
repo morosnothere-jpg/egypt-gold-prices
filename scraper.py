@@ -19,9 +19,8 @@ HEADERS = {
 }
 
 # --- VALIDATION THRESHOLDS (EGP) ---
-# Update these based on rough market expectations to catch OCR errors
-MIN_GOLD_PRICE = 2000.0   # Gold 18k is around 4000+, so 2000 is a safe floor
-MIN_SILVER_PRICE = 40.0   # Silver is usually > 50
+MIN_GOLD_PRICE = 2000.0   
+MIN_SILVER_PRICE = 40.0   
 
 # --- UTILS ---
 def cleanup_text(text):
@@ -29,77 +28,100 @@ def cleanup_text(text):
     if not text:
         return None
     # Replace common OCR misinterpretations before stripping
-    text = text.replace(',', '.') # massive safe assumption for price data if comma is used as decimal or thousand sep
-    # If we have multiple dots, keep only the last one? or remove all but last?
-    # Logic: "4.924.25" -> "4924.25"
-    if text.count('.') > 1:
-        parts = text.split('.')
-        # Join all but last with empty string, keep last part as decimal
-        text = "".join(parts[:-1]) + '.' + parts[-1]
+    text = text.replace(',', '.') 
+    
+    # Handle "5.745" or "5,745" -> "5745" logic
+    # If the text has a dot/comma that is followed by 3 digits at the end, it's likely a thousand separator
+    # UNLESS it's a small number. But gold prices are > 1000.
+    # Safe heuristic: removing all non-digits first, then if original had a decimal point at the very end... 
+    # Actually, simplistic approach: "5.745" -> 5745.0
     
     # Remove non-numeric chars except dot
     cleaned = re.sub(r'[^\d.]', '', text)
+    
+    # If multiple dots, keep last one ONLY if it looks like a decimal (followed by 1 or 2 digits). 
+    # Otherwise remove all dots.
+    if cleaned.count('.') > 0:
+        parts = cleaned.split('.')
+        if len(parts[-1]) == 3: # 5.745 -> likely thousand separator
+             cleaned = cleaned.replace('.', '')
+        elif cleaned.count('.') > 1:
+             cleaned = "".join(parts[:-1]) + '.' + parts[-1]
+            
     try:
         return float(cleaned)
     except ValueError:
         return None
 
+def process_image_variant(image, variant):
+    """Apply different preprocessing based on variant strategy."""
+    img = image.copy()
+    
+    if variant == "standard":
+        # Strategy 1: High Contrast + Thickening
+        img = img.resize((img.width * 4, img.height * 4), Image.Resampling.LANCZOS)
+        img = img.convert('L')
+        img = img.point(lambda x: 0 if x < 180 else 255, '1')
+        img = img.filter(ImageFilter.MinFilter(3)) # Dilation
+        img = ImageOps.expand(img, border=50, fill='white')
+        
+    elif variant == "no_dilation":
+        # Strategy 2: Just clean high res (for when dilation merges digits too much)
+        img = img.resize((img.width * 5, img.height * 5), Image.Resampling.BICUBIC)
+        img = img.convert('L')
+        img = img.point(lambda x: 0 if x < 160 else 255, '1')
+        img = ImageOps.expand(img, border=50, fill='white')
+        
+    elif variant == "lighter_threshold":
+        # Strategy 3: Catch faint pixels (Leading '5' issue detection)
+        img = img.resize((img.width * 4, img.height * 4), Image.Resampling.LANCZOS)
+        img = img.convert('L')
+        # Threshold higher (200) means more grey becomes black
+        img = img.point(lambda x: 0 if x < 210 else 255, '1') 
+        img = ImageOps.expand(img, border=50, fill='white')
+
+    return img
+
 def extract_price_from_base64_image(base64_string):
     """
     Extracts numeric price from a base64-encoded PNG image using OCR.
+    Tries multiple strategies to get a plausible number.
     """
     try:
         if "base64," in base64_string:
             base64_string = base64_string.split("base64,")[1]
             
         image_data = base64.b64decode(base64_string)
-        image = Image.open(io.BytesIO(image_data))
+        original_image = Image.open(io.BytesIO(image_data))
         
-        # 1. Handle transparency (Composite onto white bg)
-        if image.mode in ('RGBA', 'LA'):
-            background = Image.new('RGB', image.size, (255, 255, 255))
-            background.paste(image, mask=image.split()[-1])
-            image = background
+        # Handle transparency
+        if original_image.mode in ('RGBA', 'LA'):
+            background = Image.new('RGB', original_image.size, (255, 255, 255))
+            background.paste(original_image, mask=original_image.split()[-1])
+            original_image = background
         else:
-            image = image.convert('RGB')
+            original_image = original_image.convert('RGB')
             
-        # 2. Upscale significantly (4x)
-        # Lanczos is good, but sometimes Nearest is better for sharp pixel fonts. 
-        # sticking to Lanczos for now but increasing scale.
-        image = image.resize((image.width * 4, image.height * 4), Image.Resampling.LANCZOS)
+        # Try variations until we find a plausible number (or valid format)
+        strategies = ["lighter_threshold", "standard", "no_dilation"]
         
-        # 3. Grayscale
-        image = image.convert('L')
-        
-        # 4. Thresholding (Otsu's method is usually better than fixed 160, but let's stick to fixed if lighting is constant)
-        # However, making text thicker (Erosion) is key for "missing digits"
-        image = image.point(lambda x: 0 if x < 180 else 255, '1') # Increased threshold to capture lighter gray edge pixels
-        
-        # 5. Dilation (Thickening text)
-        # In PIL, MinFilter(3) on a binary image (0=Black, 255=White) will expand the Black areas (0) by looking for min value in 3x3 kernel.
-        # This helps connect broken lines in digits like '0' or '6'.
-        image = image.filter(ImageFilter.MinFilter(3))
-
-        # 6. Padding
-        image = ImageOps.expand(image, border=40, fill='white')
-        
-        # OCR Config
-        # psm 7 = Treat the image as a single text line.
-        # psm 8 = Treat the image as a single word.
-        # layout is usually a single number, so 7 or 8 works.
-        custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.,'
-        text = pytesseract.image_to_string(image, config=custom_config)
-        
-        result = cleanup_text(text)
-        
-        # Retry with looser config if empty
-        if result is None:
-             # Try PSM 6 (Assume a uniform block of text)
-            custom_config_loose = r'--psm 6 -c tessedit_char_whitelist=0123456789.,'
-            text = pytesseract.image_to_string(image, config=custom_config_loose)
+        for strategy in strategies:
+            processed_img = process_image_variant(original_image, strategy)
+            
+            custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.,'
+            text = pytesseract.image_to_string(processed_img, config=custom_config)
+            
             result = cleanup_text(text)
-
-        return result
+            
+            # If we got a result, check basic plausibility immediately? 
+            # Or just return the first non-None? 
+            # In this case, "745" is a result, but it's bad.
+            # But the OCR function doesn't know context (Gold vs Silver).
+            # So we return the raw number.
+            if result is not None:
+                return result
+                
+        return None
         
     except Exception as e:
         print(f"⚠️ OCR Error: {e}", file=sys.stderr)
@@ -109,8 +131,8 @@ def is_price_plausible(metal, price):
     if price is None: return False
     # Range Checks
     if metal == "gold":
-        if price < MIN_GOLD_PRICE: return False # Impossibly low
-        if price > 100000: return False # Impossibly high (sanity ceiling)
+        if price < MIN_GOLD_PRICE: return False # 745 < 2000 -> False
+        if price > 100000: return False 
     elif metal == "silver":
         if price < MIN_SILVER_PRICE: return False
         if price > 5000: return False
@@ -119,10 +141,11 @@ def is_price_plausible(metal, price):
 def validate_data(data):
     """
     Checks if the scraped data is valid AND plausible.
-    Returns (is_valid, valid_count, total_count).
+    CRITICAL: Fails validation if ANY Gold price is impossible.
     """
     valid_prices = 0
     total_prices = 0
+    suspicious_found = False
     
     # Check Gold
     if "gold" in data:
@@ -133,9 +156,11 @@ def validate_data(data):
                 if is_price_plausible("gold", price):
                     valid_prices += 1
                 else:
-                    # Invalid price detected? effectively treat as null for valid_count
                     if price is not None:
-                        print(f"⚠️ Suspicious Gold Price detected: {karat}k {type_} = {price}")
+                        print(f"⚠️ Suspicious Gold Price detected: {karat}k {type_} = {price} (Expected > {MIN_GOLD_PRICE})")
+                        suspicious_found = True # Mark as tainted
+                    else:
+                        pass # Null is just missing data, not necessarily "suspicious" logic error, but reduces count
 
     # Check Silver
     if "silver" in data:
@@ -148,8 +173,17 @@ def validate_data(data):
                 else:
                      if price is not None:
                         print(f"⚠️ Suspicious Silver Price detected: {purity} {type_} = {price}")
+                        # Silver being wrong is bad, but maybe not block-the-whole-scraping bad?
+                        # For now, let's play safe.
+                        suspicious_found = True
     
-    # Stricter Rule: We need at least 80% Valid AND Plausible prices
+    # STRICT RULE: If we found ANY suspicious (impossible) value, the OCR failed dangerously.
+    # In that case, we should declare the data INVALID to force fallback.
+    if suspicious_found:
+        print("🛑 FAST FAIL: Suspicious prices detected. Rejecting Primary source.")
+        return False, valid_prices, total_prices
+    
+    # Otherwise, check coverage
     is_valid = total_prices > 0 and (valid_prices / total_prices) > 0.8
     return is_valid, valid_prices, total_prices
 
@@ -216,16 +250,13 @@ def scrape_safehaven():
         soup = BeautifulSoup(response.text, "lxml")
 
         # Parsing logic based on provided HTML
-        # Look for tables with known structure
         
         def parse_table_row(row):
             cols = row.find_all('td')
             if len(cols) < 3: return None, None, None
             
-            # Col 1: Name (e.g. "عيار 24")
             name_text = cols[0].get_text(strip=True)
             
-            # Identify Karat from name
             karat = None
             if "24" in name_text: karat = "24"
             elif "22" in name_text: karat = "22"
@@ -235,7 +266,6 @@ def scrape_safehaven():
             elif "925" in name_text: karat = "925"
             elif "800" in name_text: karat = "800"
             
-            # Col 2: Sell, Col 3: Buy
             sell = cleanup_text(cols[1].get_text())
             buy = cleanup_text(cols[2].get_text())
             
@@ -244,22 +274,19 @@ def scrape_safehaven():
         gold_data = {}
         silver_data = {}
         
-        # Locate all tables and try to parse rows
         for table in soup.find_all("table"):
             for row in table.find_all("tr"):
                 karat, sell, buy = parse_table_row(row)
                 if karat:
                     item = {"sell": sell, "buy": buy}
-                    if int(karat) < 100: # Simple heuristic for Gold vs Silver
+                    if int(karat) < 100: 
                         gold_data[karat] = item
                     else:
                         silver_data[karat] = item
                         
-        # Ensure we have the structure even if partial data
         data = {
             "gold": {
                  "24": gold_data.get("24", {"sell": None, "buy": None}),
-
                  "21": gold_data.get("21", {"sell": None, "buy": None}),
                  "18": gold_data.get("18", {"sell": None, "buy": None}),
             },
@@ -279,19 +306,29 @@ def scrape_safehaven():
 def main():
     final_data = None
     
-    # Try Primary
-    data_primary = scrape_isagha()
-    if data_primary:
-        is_valid, valid_count, total = validate_data(data_primary)
-        print(f"📊 [Primary] Extracted {valid_count}/{total} prices.")
-        if is_valid:
-            final_data = data_primary
+    # Try Primary with Retries
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        print(f"🔄 [Primary] Attempt {attempt}/{max_retries}...")
+        data_primary = scrape_isagha()
+        
+        if data_primary:
+            is_valid, valid_count, total = validate_data(data_primary)
+            if is_valid:
+                print(f"📊 [Primary] Success! Extracted {valid_count}/{total} prices.")
+                final_data = data_primary
+                break # Success, exit loop
+            else:
+                print(f"⚠️ [Primary] Validation failed (Attempt {attempt}). Retrying...")
         else:
-            print("⚠️ [Primary] Data validation failed (too many nulls or suspicious values).")
+            print(f"⚠️ [Primary] Connection/Scraping failed (Attempt {attempt}). Retrying...")
+            
+        if attempt < max_retries:
+            time.sleep(2) # Short pause between retries
     
-    # Try Backup if Primary failed
+    # Try Backup if Primary failed after all retries
     if not final_data:
-        print("⚠️ Switching to Backup Source...")
+        print("❌ [Primary] All attempts failed. Switching to Backup Source...")
         data_backup = scrape_safehaven()
         if data_backup:
             is_valid, valid_count, total = validate_data(data_backup)
