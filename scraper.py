@@ -27,14 +27,15 @@ def cleanup_text(text):
     """Clean up price text by removing currency symbols and whitespace."""
     if not text:
         return None
+    
+    # Common OCR substitutions (Digits misread as letters)
+    text = text.replace('S', '5').replace('s', '5')
+    text = text.replace('O', '0').replace('o', '0')
+    text = text.replace('I', '1').replace('l', '1')
+    text = text.replace('B', '8')
+    
     # Replace common OCR misinterpretations before stripping
     text = text.replace(',', '.') 
-    
-    # Handle "5.745" or "5,745" -> "5745" logic
-    # If the text has a dot/comma that is followed by 3 digits at the end, it's likely a thousand separator
-    # UNLESS it's a small number. But gold prices are > 1000.
-    # Safe heuristic: removing all non-digits first, then if original had a decimal point at the very end... 
-    # Actually, simplistic approach: "5.745" -> 5745.0
     
     # Remove non-numeric chars except dot
     cleaned = re.sub(r'[^\d.]', '', text)
@@ -85,7 +86,7 @@ def process_image_variant(image, variant):
 def extract_price_from_base64_image(base64_string):
     """
     Extracts numeric price from a base64-encoded PNG image using OCR.
-    Tries multiple strategies to get a plausible number.
+    Tries multiple strategies and returns the BEST (Largest) result.
     """
     try:
         if "base64," in base64_string:
@@ -105,21 +106,30 @@ def extract_price_from_base64_image(base64_string):
         # Try variations until we find a plausible number (or valid format)
         strategies = ["lighter_threshold", "standard", "no_dilation"]
         
+        candidates = []
+        
         for strategy in strategies:
             processed_img = process_image_variant(original_image, strategy)
             
-            custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.,'
+            custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.,SlBoI'
+            # Note: Whitelist technically restricts Tesseract from outputting 'S', 
+            # but sometimes it helps to relax it or map it later. 
+            # Actually, standard whitelist is safer if we trust cleanup_text handles substitutions if they leak through?
+            # With `tessedit_char_whitelist=0123456789.,` Tesseract is FORCED to pick a digit.
+            # If it sees an 'S', it might pick '5' automatically, or output nothing.
+            # Let's keep strict whitelist for now, assuming Tesseract does checking.
+            
             text = pytesseract.image_to_string(processed_img, config=custom_config)
             
             result = cleanup_text(text)
             
-            # If we got a result, check basic plausibility immediately? 
-            # Or just return the first non-None? 
-            # In this case, "745" is a result, but it's bad.
-            # But the OCR function doesn't know context (Gold vs Silver).
-            # So we return the raw number.
             if result is not None:
-                return result
+                candidates.append(result)
+        
+        if candidates:
+            # Heuristic: The largest number is likely the correct one (missing digits makes number smaller)
+            # e.g. [745.0, 5745.0, 745.0] -> 5745.0
+            return max(candidates)
                 
         return None
         
