@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import base64
 import io
 import pytesseract
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFilter
 import re
 import sys
 import time
@@ -18,11 +18,25 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
+# --- VALIDATION THRESHOLDS (EGP) ---
+# Update these based on rough market expectations to catch OCR errors
+MIN_GOLD_PRICE = 2000.0   # Gold 18k is around 4000+, so 2000 is a safe floor
+MIN_SILVER_PRICE = 40.0   # Silver is usually > 50
+
 # --- UTILS ---
 def cleanup_text(text):
     """Clean up price text by removing currency symbols and whitespace."""
     if not text:
         return None
+    # Replace common OCR misinterpretations before stripping
+    text = text.replace(',', '.') # massive safe assumption for price data if comma is used as decimal or thousand sep
+    # If we have multiple dots, keep only the last one? or remove all but last?
+    # Logic: "4.924.25" -> "4924.25"
+    if text.count('.') > 1:
+        parts = text.split('.')
+        # Join all but last with empty string, keep last part as decimal
+        text = "".join(parts[:-1]) + '.' + parts[-1]
+    
     # Remove non-numeric chars except dot
     cleaned = re.sub(r'[^\d.]', '', text)
     try:
@@ -41,7 +55,7 @@ def extract_price_from_base64_image(base64_string):
         image_data = base64.b64decode(base64_string)
         image = Image.open(io.BytesIO(image_data))
         
-        # 1. Handle transparency
+        # 1. Handle transparency (Composite onto white bg)
         if image.mode in ('RGBA', 'LA'):
             background = Image.new('RGB', image.size, (255, 255, 255))
             background.paste(image, mask=image.split()[-1])
@@ -49,48 +63,93 @@ def extract_price_from_base64_image(base64_string):
         else:
             image = image.convert('RGB')
             
-        # 2. Upscale (3x)
-        image = image.resize((image.width * 3, image.height * 3), Image.Resampling.LANCZOS)
+        # 2. Upscale significantly (4x)
+        # Lanczos is good, but sometimes Nearest is better for sharp pixel fonts. 
+        # sticking to Lanczos for now but increasing scale.
+        image = image.resize((image.width * 4, image.height * 4), Image.Resampling.LANCZOS)
         
         # 3. Grayscale
         image = image.convert('L')
         
-        # 4. Thresholding
-        image = image.point(lambda x: 0 if x < 160 else 255, '1')
+        # 4. Thresholding (Otsu's method is usually better than fixed 160, but let's stick to fixed if lighting is constant)
+        # However, making text thicker (Erosion) is key for "missing digits"
+        image = image.point(lambda x: 0 if x < 180 else 255, '1') # Increased threshold to capture lighter gray edge pixels
         
-        # 5. Padding
-        image = ImageOps.expand(image, border=20, fill='white')
+        # 5. Dilation (Thickening text)
+        # In PIL, MinFilter(3) on a binary image (0=Black, 255=White) will expand the Black areas (0) by looking for min value in 3x3 kernel.
+        # This helps connect broken lines in digits like '0' or '6'.
+        image = image.filter(ImageFilter.MinFilter(3))
+
+        # 6. Padding
+        image = ImageOps.expand(image, border=40, fill='white')
         
         # OCR Config
+        # psm 7 = Treat the image as a single text line.
+        # psm 8 = Treat the image as a single word.
+        # layout is usually a single number, so 7 or 8 works.
         custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.,'
         text = pytesseract.image_to_string(image, config=custom_config)
         
-        if not text.strip():
-            custom_config_loose = r'--psm 7'
+        result = cleanup_text(text)
+        
+        # Retry with looser config if empty
+        if result is None:
+             # Try PSM 6 (Assume a uniform block of text)
+            custom_config_loose = r'--psm 6 -c tessedit_char_whitelist=0123456789.,'
             text = pytesseract.image_to_string(image, config=custom_config_loose)
+            result = cleanup_text(text)
 
-        return cleanup_text(text)
+        return result
         
     except Exception as e:
         print(f"⚠️ OCR Error: {e}", file=sys.stderr)
         return None
 
+def is_price_plausible(metal, price):
+    if price is None: return False
+    # Range Checks
+    if metal == "gold":
+        if price < MIN_GOLD_PRICE: return False # Impossibly low
+        if price > 100000: return False # Impossibly high (sanity ceiling)
+    elif metal == "silver":
+        if price < MIN_SILVER_PRICE: return False
+        if price > 5000: return False
+    return True
+
 def validate_data(data):
     """
-    Checks if the scraped data is valid (i.e., has enough non-null values).
+    Checks if the scraped data is valid AND plausible.
     Returns (is_valid, valid_count, total_count).
     """
     valid_prices = 0
     total_prices = 0
-    for metal in ["gold", "silver"]:
-        if metal in data:
-            for karat in data[metal]:
-                for type_ in ["sell", "buy"]:
-                    total_prices += 1
-                    if data[metal][karat].get(type_) is not None:
-                        valid_prices += 1
     
-    # Consider valid if we have > 80% of the data (i.e. < 20% nulls)
+    # Check Gold
+    if "gold" in data:
+        for karat, values in data["gold"].items():
+            for type_ in ["sell", "buy"]:
+                total_prices += 1
+                price = values.get(type_)
+                if is_price_plausible("gold", price):
+                    valid_prices += 1
+                else:
+                    # Invalid price detected? effectively treat as null for valid_count
+                    if price is not None:
+                        print(f"⚠️ Suspicious Gold Price detected: {karat}k {type_} = {price}")
+
+    # Check Silver
+    if "silver" in data:
+        for purity, values in data["silver"].items():
+            for type_ in ["sell", "buy"]:
+                total_prices += 1
+                price = values.get(type_)
+                if is_price_plausible("silver", price):
+                    valid_prices += 1
+                else:
+                     if price is not None:
+                        print(f"⚠️ Suspicious Silver Price detected: {purity} {type_} = {price}")
+    
+    # Stricter Rule: We need at least 80% Valid AND Plausible prices
     is_valid = total_prices > 0 and (valid_prices / total_prices) > 0.8
     return is_valid, valid_prices, total_prices
 
@@ -228,7 +287,7 @@ def main():
         if is_valid:
             final_data = data_primary
         else:
-            print("⚠️ [Primary] Data validation failed (too many nulls).")
+            print("⚠️ [Primary] Data validation failed (too many nulls or suspicious values).")
     
     # Try Backup if Primary failed
     if not final_data:
