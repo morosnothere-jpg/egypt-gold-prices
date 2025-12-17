@@ -311,7 +311,7 @@ def scrape_isagha():
                 sell, buy = get_price_from_card(card)
                 
                 # Store
-                if metal == "gold" and karat in ["24", "22", "21", "18", "14", "12", "9"]:
+                if metal == "gold" and karat in ["24", "21", "18"]:
                    data["gold"][karat] = {"sell": sell, "buy": buy}
                    
                 elif metal == "silver" and karat in ["999", "925", "800"]:
