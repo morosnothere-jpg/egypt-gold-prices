@@ -59,26 +59,31 @@ def process_image_variant(image, variant):
     img = image.copy()
     
     if variant == "standard":
-        # Strategy 1: High Contrast + Thickening
+        # Strategy 1: Sharp, High Res, No Filter
+        # Good for clean, dark text on white background
         img = img.resize((img.width * 4, img.height * 4), Image.Resampling.LANCZOS)
         img = img.convert('L')
-        img = img.point(lambda x: 0 if x < 180 else 255, '1')
-        img = img.filter(ImageFilter.MinFilter(3)) # Dilation
-        img = ImageOps.expand(img, border=50, fill='white')
-        
-    elif variant == "no_dilation":
-        # Strategy 2: Just clean high res (for when dilation merges digits too much)
-        img = img.resize((img.width * 5, img.height * 5), Image.Resampling.BICUBIC)
-        img = img.convert('L')
+        # Threshold: < 160 becomes Black (0), rest White (255)
+        # Avoid aggressive thickening that merges "85" -> "BS" -> "B5" or 8->5
         img = img.point(lambda x: 0 if x < 160 else 255, '1')
         img = ImageOps.expand(img, border=50, fill='white')
         
-    elif variant == "lighter_threshold":
-        # Strategy 3: Catch faint pixels (Leading '5' issue detection)
+    elif variant == "thicken":
+        # Strategy 2: Thicken the text (Good if text is too thin/faint)
+        # With Dark Text (0) on White (255): MinFilter spreads 0 (Black).
         img = img.resize((img.width * 4, img.height * 4), Image.Resampling.LANCZOS)
         img = img.convert('L')
-        # Threshold higher (200) means more grey becomes black
-        img = img.point(lambda x: 0 if x < 210 else 255, '1') 
+        img = img.point(lambda x: 0 if x < 180 else 255, '1')
+        img = img.filter(ImageFilter.MinFilter(3)) # Thicken black text
+        img = ImageOps.expand(img, border=50, fill='white')
+        
+    elif variant == "erode":
+        # Strategy 3: Thin the text (Good if text is blobby/merged)
+        # MaxFilter spreads 255 (White), eating into Black text.
+        img = img.resize((img.width * 4, img.height * 4), Image.Resampling.LANCZOS)
+        img = img.convert('L')
+        img = img.point(lambda x: 0 if x < 160 else 255, '1') 
+        img = img.filter(ImageFilter.MaxFilter(3)) # Thin black text
         img = ImageOps.expand(img, border=50, fill='white')
 
     return img
@@ -106,7 +111,7 @@ def extract_price_from_base64_image(base64_string):
             img_to_process = original_image.convert('RGB')
             
         # Try variations
-        strategies = ["standard", "lighter_threshold", "no_dilation"]
+        strategies = ["standard", "thicken", "erode"]
         candidates = []
         
         for strategy in strategies:
