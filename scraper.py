@@ -20,6 +20,7 @@ HEADERS = {
 
 # --- VALIDATION THRESHOLDS (EGP) ---
 MIN_GOLD_PRICE = 2000.0   
+MAX_GOLD_PRICE = 48000.0   # 🆕 NEW: Maximum price for PRIMARY source only
 MIN_SILVER_PRICE = 40.0   
 
 # --- UTILS ---
@@ -112,12 +113,6 @@ def extract_price_from_base64_image(base64_string):
             processed_img = process_image_variant(original_image, strategy)
             
             custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.,SlBoI'
-            # Note: Whitelist technically restricts Tesseract from outputting 'S', 
-            # but sometimes it helps to relax it or map it later. 
-            # Actually, standard whitelist is safer if we trust cleanup_text handles substitutions if they leak through?
-            # With `tessedit_char_whitelist=0123456789.,` Tesseract is FORCED to pick a digit.
-            # If it sees an 'S', it might pick '5' automatically, or output nothing.
-            # Let's keep strict whitelist for now, assuming Tesseract does checking.
             
             text = pytesseract.image_to_string(processed_img, config=custom_config)
             
@@ -137,19 +132,37 @@ def extract_price_from_base64_image(base64_string):
         print(f"⚠️ OCR Error: {e}", file=sys.stderr)
         return None
 
-def is_price_plausible(metal, price):
-    if price is None: return False
+def is_price_plausible(metal, price, source="primary"):
+    """
+    🆕 UPDATED: Added source parameter to apply different rules for primary vs backup
+    """
+    if price is None: 
+        return False
+    
     # Range Checks
     if metal == "gold":
-        if price < MIN_GOLD_PRICE: return False # 745 < 2000 -> False
-        if price > 100000: return False 
+        if price < MIN_GOLD_PRICE: 
+            return False
+        
+        # 🆕 NEW: Apply MAX limit ONLY for PRIMARY source
+        if source == "primary" and price > MAX_GOLD_PRICE:
+            return False
+        
+        # For backup source, use more lenient upper limit
+        if source == "backup" and price > 100000:
+            return False
+            
     elif metal == "silver":
-        if price < MIN_SILVER_PRICE: return False
-        if price > 5000: return False
+        if price < MIN_SILVER_PRICE: 
+            return False
+        if price > 5000: 
+            return False
+            
     return True
 
-def validate_data(data):
+def validate_data(data, source="primary"):
     """
+    🆕 UPDATED: Added source parameter to pass to is_price_plausible
     Checks if the scraped data is valid AND plausible.
     CRITICAL: Fails validation if ANY Gold price is impossible.
     """
@@ -163,14 +176,15 @@ def validate_data(data):
             for type_ in ["sell", "buy"]:
                 total_prices += 1
                 price = values.get(type_)
-                if is_price_plausible("gold", price):
+                if is_price_plausible("gold", price, source=source):
                     valid_prices += 1
                 else:
                     if price is not None:
-                        print(f"⚠️ Suspicious Gold Price detected: {karat}k {type_} = {price} (Expected > {MIN_GOLD_PRICE})")
-                        suspicious_found = True # Mark as tainted
-                    else:
-                        pass # Null is just missing data, not necessarily "suspicious" logic error, but reduces count
+                        if source == "primary":
+                            print(f"⚠️ Suspicious Gold Price detected: {karat}k {type_} = {price} (Expected {MIN_GOLD_PRICE}-{MAX_GOLD_PRICE})")
+                        else:
+                            print(f"⚠️ Suspicious Gold Price detected: {karat}k {type_} = {price} (Expected > {MIN_GOLD_PRICE})")
+                        suspicious_found = True
 
     # Check Silver
     if "silver" in data:
@@ -178,19 +192,16 @@ def validate_data(data):
             for type_ in ["sell", "buy"]:
                 total_prices += 1
                 price = values.get(type_)
-                if is_price_plausible("silver", price):
+                if is_price_plausible("silver", price, source=source):
                     valid_prices += 1
                 else:
                      if price is not None:
                         print(f"⚠️ Suspicious Silver Price detected: {purity} {type_} = {price}")
-                        # Silver being wrong is bad, but maybe not block-the-whole-scraping bad?
-                        # For now, let's play safe.
                         suspicious_found = True
     
     # STRICT RULE: If we found ANY suspicious (impossible) value, the OCR failed dangerously.
-    # In that case, we should declare the data INVALID to force fallback.
     if suspicious_found:
-        print("🛑 FAST FAIL: Suspicious prices detected. Rejecting Primary source.")
+        print(f"🛑 FAST FAIL: Suspicious prices detected in {source.upper()} source. Rejecting data.")
         return False, valid_prices, total_prices
     
     # Otherwise, check coverage
@@ -323,7 +334,8 @@ def main():
         data_primary = scrape_isagha()
         
         if data_primary:
-            is_valid, valid_count, total = validate_data(data_primary)
+            # 🆕 UPDATED: Pass source="primary" to enforce MAX_GOLD_PRICE limit
+            is_valid, valid_count, total = validate_data(data_primary, source="primary")
             if is_valid:
                 print(f"📊 [Primary] Success! Extracted {valid_count}/{total} prices.")
                 final_data = data_primary
@@ -341,7 +353,8 @@ def main():
         print("❌ [Primary] All attempts failed. Switching to Backup Source...")
         data_backup = scrape_safehaven()
         if data_backup:
-            is_valid, valid_count, total = validate_data(data_backup)
+            # 🆕 UPDATED: Pass source="backup" to use lenient upper limit
+            is_valid, valid_count, total = validate_data(data_backup, source="backup")
             print(f"📊 [Backup] Extracted {valid_count}/{total} prices.")
             if is_valid:
                 final_data = data_backup
