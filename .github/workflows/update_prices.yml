@@ -2,7 +2,7 @@ name: Update gold/silver prices
 
 on:
   schedule:
-    - cron: '*/151 * * * *'   # every 151 minutes
+    - cron: '*/218 * * * *'   # every 218 minutes
   workflow_dispatch:          # allow manual trigger too
 
 jobs:
@@ -12,8 +12,8 @@ jobs:
     steps:
       - name: Random Sleep for Stealth
         run: |
-          # Sleep for a random time between 0 and 254 seconds
-          SLEEP_TIME=$((RANDOM % 254))
+          # Sleep for a random time between 0 and 218 seconds
+          SLEEP_TIME=$((RANDOM % 218))
           echo "Sleeping for $SLEEP_TIME seconds to randomize execution time..."
           sleep $SLEEP_TIME
 
