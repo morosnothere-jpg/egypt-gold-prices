@@ -83,12 +83,10 @@ def process_image_variant(image, variant):
 
     return img
 
-from collections import Counter
-
 def extract_price_from_base64_image(base64_string):
     """
     Extracts numeric price from a base64-encoded PNG image using OCR.
-    Uses Majority Vote strategy to avoid outliers (e.g. extra noise interpreted as digits).
+    Tries multiple strategies and returns the BEST (Largest) result.
     """
     try:
         if "base64," in base64_string:
@@ -101,54 +99,37 @@ def extract_price_from_base64_image(base64_string):
         if original_image.mode in ('RGBA', 'LA'):
             background = Image.new('RGB', original_image.size, (255, 255, 255))
             background.paste(original_image, mask=original_image.split()[-1])
-            img_to_process = background
+            original_image = background
         else:
-            img_to_process = original_image.convert('RGB')
+            original_image = original_image.convert('RGB')
             
-        # Try variations
-        strategies = ["standard", "lighter_threshold", "no_dilation"]
+        # Try variations until we find a plausible number (or valid format)
+        strategies = ["lighter_threshold", "standard", "no_dilation"]
+        
         candidates = []
         
         for strategy in strategies:
-            processed_img = process_image_variant(img_to_process, strategy)
-            # Use stricter config if possible, but keep whitelist to force digits
+            processed_img = process_image_variant(original_image, strategy)
+            
             custom_config = r'--psm 7 -c tessedit_char_whitelist=0123456789.,SlBoI'
+            # Note: Whitelist technically restricts Tesseract from outputting 'S', 
+            # but sometimes it helps to relax it or map it later. 
+            # Actually, standard whitelist is safer if we trust cleanup_text handles substitutions if they leak through?
+            # With `tessedit_char_whitelist=0123456789.,` Tesseract is FORCED to pick a digit.
+            # If it sees an 'S', it might pick '5' automatically, or output nothing.
+            # Let's keep strict whitelist for now, assuming Tesseract does checking.
             
             text = pytesseract.image_to_string(processed_img, config=custom_config)
+            
             result = cleanup_text(text)
             
             if result is not None:
                 candidates.append(result)
         
         if candidates:
-            # STRATEGY: Majority Vote / Mode
-            # If we have [5765, 57655, 5765], we want 5765.
-            # If we have [5765, 5765, 5765], we want 5765.
-            # If we have [5765, 5766, 5767], we have a problem (Tie).
-            
-            counts = Counter(candidates)
-            most_common = counts.most_common()
-            
-            # Get the value with the highest count
-            best_val, count = most_common[0]
-            
-            # If there's a tie for first place (e.g. 1 vote each for 3 diff numbers),
-            # we prefer the one that came from the 'standard' strategy (first in list).
-            # But Counter.most_common preserves insertion order for ties in modern Python? 
-            # Not strictly guaranteed to rely on.
-            # Let's check for specific outliers: 
-            # If the max value is > 5x the min value, and min value is plausible (>20), prefer min.
-            # (Fixes the 5765 vs 57655 issue where noise adds a digit)
-            
-            min_c = min(candidates)
-            max_c = max(candidates)
-            
-            if max_c > 5 * min_c and min_c > 20:
-                 # Suspect extra digit error (e.g. 5000 vs 50000)
-                 # Unless the 'min' is absurdly low (like 5.0), but we check > 20.
-                 return min_c
-                 
-            return best_val
+            # Heuristic: The largest number is likely the correct one (missing digits makes number smaller)
+            # e.g. [745.0, 5745.0, 745.0] -> 5745.0
+            return max(candidates)
                 
         return None
         
@@ -217,51 +198,15 @@ def validate_data(data):
     return is_valid, valid_prices, total_prices
 
 # --- PRIMARY SCRAPER (ISAGHA) ---
-def get_price_from_card(card_element):
-    """Helper to extract sell/buy prices from a specific gauge card element."""
-    try:
-        # Select Stats section
-        stats = card_element.select_one(".clearfix.stats")
-        if not stats: return None, None
-        
-        # Usually: 
-        # Div 1 -> Sell (value, state=بيع)
-        # Div 2 -> Buy (value, state=شراء)
-        
-        # Ensure we target the right columns based on inner text or order
-        # The HTML Structure:
-        # <div class="col-xs-4"> <div class="value">...</div> <div class="state">بيع</div> </div>
-        # <div class="col-xs-4"> <div class="value">...</div> <div class="state">شراء</div> </div>
-        
-        sell_price = None
-        buy_price = None
-        
-        columns = stats.select(".col-xs-4, .col-sm-4") # Responsive classes might vary
-        
-        for col in columns:
-            state_div = col.select_one(".state")
-            val_div = col.select_one(".value")
-            
-            if state_div and val_div:
-                state_text = state_div.get_text(strip=True)
-                
-                # Extract raw value (image or text)
-                raw_val = None
-                img = val_div.select_one('img[src^="data:image/"]')
-                if img:
-                    raw_val = extract_price_from_base64_image(img['src'])
-                else:
-                    raw_val = cleanup_text(val_div.get_text(strip=True))
-                
-                if "بيع" in state_text:
-                    sell_price = raw_val
-                elif "شراء" in state_text:
-                    buy_price = raw_val
-                    
-        return sell_price, buy_price
-    except Exception as e:
-        print(f"⚠️ Error parsing card: {e}")
-        return None, None
+def get_price_isagha(selector, soup):
+    el = soup.select_one(selector)
+    if not el:
+        return None
+    img = el.select_one('img[src^="data:image/"]')
+    if img:
+        return extract_price_from_base64_image(img['src'])
+    text = el.get_text(strip=True)
+    return cleanup_text(text)
 
 def scrape_isagha():
     print("🔄 [Primary] Fetching data from Isagha...")
@@ -270,69 +215,38 @@ def scrape_isagha():
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "lxml")
 
-        data = { "gold": {}, "silver": {} }
+        data = {
+            "gold": {
+                "24": {
+                    "sell": get_price_isagha("#gold > div > div:nth-child(1) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup),
+                    "buy": get_price_isagha("#gold > div > div:nth-child(1) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup)
+                },
 
-        # --- DYNAMIC PARSING ---
-        # Locate the container for Gold and Silver
-        # Based on HTML: <div role="tabpanel" class="tab-pane active in fade" id="gold">
-        # and id="silver"
-        
-        metals = ["gold", "silver"]
-        
-        for metal in metals:
-            container = soup.select_one(f"#{metal}")
-            if not container:
-                print(f"⚠️ Container #{metal} not found.")
-                continue
-                
-            # Iterate through all product/gauge cards
-            # The structure is direct children rows/cols. 
-            # We look for divs that act as cards.
-            # Best selector: look for elements containing ".isagha-panel" which seems to be the Gauge Card class.
-            
-            gauge_cards = container.select(".isagha-panel")
-            
-            for card in gauge_cards:
-                # Find the gauge title (e.g. "عيار 24")
-                gauge_title_div = card.select_one(".gauge")
-                if not gauge_title_div: continue
-                
-                title_text = gauge_title_div.get_text(strip=True)
-                
-                # Normalize Title (remove "عيار", whitespace)
-                # "عيار 24 " -> "24"
-                karat = "".join(filter(str.isdigit, title_text))
-                
-                if not karat: continue
-                
-                # Map 999/etc for silver if needed, or just use extracted number
-                # Silver usually: "عيار 999", "عيار 925"...
-                
-                sell, buy = get_price_from_card(card)
-                
-                # Store
-                if metal == "gold" and karat in ["24", "21", "18"]:
-                   data["gold"][karat] = {"sell": sell, "buy": buy}
-                   
-                elif metal == "silver" and karat in ["999", "925", "800"]:
-                   data["silver"][karat] = {"sell": sell, "buy": buy}
-
-        # Check if we missed any critical keys, fill with None to match structure
-        required_keys = {
-            "gold": ["24", "21", "18"], 
-            "silver": ["999", "925", "800"]
+                "21": {
+                    "sell": get_price_isagha("#gold > div > div:nth-child(7) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup),
+                    "buy": get_price_isagha("#gold > div > div:nth-child(7) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup)
+                },
+                "18": {
+                    "sell": get_price_isagha("#gold > div > div:nth-child(10) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup),
+                    "buy": get_price_isagha("#gold > div > div:nth-child(10) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup)
+                },
+            },
+            "silver": {
+                "999": {
+                    "sell": get_price_isagha("#silver > div > div:nth-child(1) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup),
+                    "buy": get_price_isagha("#silver > div > div:nth-child(1) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup)
+                },
+                "925": {
+                    "sell": get_price_isagha("#silver > div > div:nth-child(4) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup),
+                    "buy": get_price_isagha("#silver > div > div:nth-child(4) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup)
+                },
+                "800": {
+                    "sell": get_price_isagha("#silver > div > div:nth-child(10) > div > div.clearfix.stats > div:nth-child(1) > div.value", soup),
+                    "buy": get_price_isagha("#silver > div > div:nth-child(10) > div > div.clearfix.stats > div:nth-child(2) > div.value", soup)
+                },
+            }
         }
-        
-        for metal, keys in required_keys.items():
-            for k in keys:
-                if k not in data[metal]:
-                    data[metal][k] = {"sell": None, "buy": None}
-
-        # Filter out random junk karats if we want strictly the schema (Optional)
-        # For now, keeping what we found is fine, but lets ensure structure matches expectation
-        
         return data
-
     except Exception as e:
         print(f"❌ [Primary] Failed: {e}", file=sys.stderr)
         return None
